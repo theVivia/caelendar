@@ -514,8 +514,18 @@ static std::vector<TimeBlock> LayoutDayBlocks(const std::vector<int>& idxs, cons
         colEnd[col] = b.endMin;
         b.col = col;
     }
-    int maxCols = std::max(1, (int)colEnd.size());
-    for (auto& b : blocks) b.maxCols = maxCols;
+    // 每个块只按「与它时间真正重叠的块」计算占用列数：
+    // 不重叠的事件保持全宽，不被同一列别处的重叠对连累缩窄
+    for (size_t i = 0; i < blocks.size(); ++i) {
+        int groupCols = blocks[i].col + 1;
+        for (size_t j = 0; j < blocks.size(); ++j) {
+            if (i == j) continue;
+            const bool overlap = blocks[i].startMin < blocks[j].endMin &&
+                                 blocks[j].startMin < blocks[i].endMin;
+            if (overlap) groupCols = (std::max)(groupCols, blocks[j].col + 1);
+        }
+        blocks[i].maxCols = (std::max)(1, groupCols);
+    }
     return blocks;
 }
 

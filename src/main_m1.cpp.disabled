@@ -1,0 +1,749 @@
+// main.cpp - 星历 XingLi：WinMain、自定义窗口框架、主布局、月视图（M1）
+#include "util.h"
+#include "gfx.h"
+#include "theme.h"
+#include <windows.h>
+#include <windowsx.h>
+#include <shellapi.h>
+#include <dwmapi.h>
+#include <vector>
+#include <string>
+#include <set>
+#include <algorithm>
+#include <cmath>
+
+using namespace gfx;
+using namespace Gdiplus;
+
+// ---------------- 全局状态（M1） ----------------
+static HWND g_hwnd = nullptr;
+static HDC g_memdc = nullptr;
+static HBITMAP g_hbmp = nullptr;
+static void* g_bits = nullptr;
+static int g_bufW = 0, g_bufH = 0;
+static UINT_PTR g_gdiToken = 0;
+
+static int g_themeIdx = 0;
+static int g_view = 0;                 // 0月 1周 2日 3日程
+static DateTime g_cursor = Today();    // 当前查看日期
+static DateTime g_now = NowDT();
+static std::set<int> g_tagFilter;
+static int g_waterCups = 6;
+static int g_hoverCmd = 0;
+
+struct Hit { RectF r; int cmd; };
+static std::vector<Hit> g_hits;
+static std::vector<RECT> g_noDrag;      // 标题栏里可点击区域（客户区坐标）
+
+static std::wstring g_shotPath;
+static bool g_shotMode = false;
+static bool g_demoMode = false;
+static int g_forceW = 0, g_forceH = 0;
+static bool g_maximized = false;
+static bool g_selftest = false;
+int RunSelfTests();
+
+enum Cmd {
+    CMD_NONE = 0,
+    CMD_MIN = 1, CMD_MAX, CMD_CLOSE,
+    CMD_VIEW_MONTH = 10, CMD_VIEW_WEEK, CMD_VIEW_DAY, CMD_VIEW_AGENDA,
+    CMD_PREV = 20, CMD_NEXT, CMD_TODAY,
+    CMD_NEW = 30, CMD_SEARCH, CMD_THEME, CMD_SETTINGS,
+    CMD_TAG_BASE = 100,
+    CMD_WATER = 200,
+    CMD_THEME_MENU_BASE = 300,
+    CMD_DAY_BASE = 1000,
+    CMD_EVENT_BASE = 2000,
+};
+
+// ---------------- 标签与示例数据 ----------------
+struct TagDef { const wchar_t* name; const wchar_t* hex; };
+static TagDef g_tags[] = {
+    { L"课程",   L"#6EA8FF" }, { L"学习",   L"#8E7BFF" }, { L"作业",   L"#FFB454" },
+    { L"考试",   L"#FF6B7A" }, { L"实验",   L"#4FD1C5" }, { L"小组作业", L"#F9A8D4" },
+    { L"社团",   L"#C084FC" }, { L"生活",   L"#A3E635" }, { L"锻炼",   L"#34D399" },
+    { L"喝水",   L"#38BDF8" }, { L"会议",   L"#FB923C" }, { L"兼职",   L"#FACC15" },
+    { L"通勤",   L"#94A3B8" }, { L"财务",   L"#4ADE80" }, { L"生日",   L"#F472B6" },
+    { L"竞赛",   L"#E3C177" }, { L"志愿",   L"#60A5FA" }, { L"灵感",   L"#FCD34D" },
+};
+static const int TAG_COUNT = (int)(sizeof(g_tags) / sizeof(g_tags[0]));
+
+struct DemoEv {
+    DateTime start; int durMin; const wchar_t* title; int tag; bool allDay;
+    int serial() const { return DaySerial(start.y, start.mo, start.d); }
+};
+static std::vector<DemoEv> g_demo;
+
+static int TagCount(int idx) {
+    int n = 0;
+    for (auto& e : g_demo) if (e.tag == idx) ++n;
+    return n;
+}
+
+static void AddDemo(int y, int mo, int d, int sh, int sm, int dur, const wchar_t* title, int tag, bool allDay = false) {
+    DemoEv e;
+    e.start = MakeDT(y, mo, d, sh, sm);
+    e.durMin = dur;
+    e.title = title;
+    e.tag = tag;
+    e.allDay = allDay;
+    g_demo.push_back(e);
+}
+
+static void BuildDemoData() {
+    // 2026 秋：9/28 - 11/8 的课表与生活日程
+    DateTime from = MakeDT(2026, 9, 28), to = MakeDT(2026, 11, 8);
+    for (DateTime t = from; CompareDT(t, to) <= 0; t = AddDaysDT(t, 1)) {
+        int wd = DayOfWeek(t.y, t.mo, t.d);
+        if (wd == 1) { AddDemo(t.y, t.mo, t.d, 8, 0, 100, L"高等数学", 0); AddDemo(t.y, t.mo, t.d, 14, 0, 100, L"大学英语", 0); }
+        if (wd == 2) { AddDemo(t.y, t.mo, t.d, 10, 0, 100, L"大学物理", 0); AddDemo(t.y, t.mo, t.d, 16, 0, 100, L"体育", 0); }
+        if (wd == 3) { AddDemo(t.y, t.mo, t.d, 8, 0, 100, L"高等数学", 0); AddDemo(t.y, t.mo, t.d, 14, 0, 150, L"电路实验", 4); }
+        if (wd == 4) { AddDemo(t.y, t.mo, t.d, 10, 0, 100, L"大学物理", 0); AddDemo(t.y, t.mo, t.d, 19, 0, 90, L"图书馆自习", 1); }
+        if (wd == 5) { AddDemo(t.y, t.mo, t.d, 8, 0, 100, L"程序设计基础", 0); AddDemo(t.y, t.mo, t.d, 19, 0, 120, L"社团例会", 6); }
+        if (wd == 6) { AddDemo(t.y, t.mo, t.d, 10, 0, 90, L"图书馆自习", 1); }
+    }
+    AddDemo(2026, 10, 17, 15, 0, 120, L"小组作业讨论", 5);
+    AddDemo(2026, 10, 18, 23, 59, 0, L"英语作文截止", 2, true);
+    AddDemo(2026, 10, 20, 19, 0, 90, L"物理期中考试", 3);
+    AddDemo(2026, 10, 21, 22, 0, 0, L"高数作业提交", 2, true);
+    AddDemo(2026, 10, 25, 0, 0, 0, L"同学生日", 14, true);
+    AddDemo(2026, 10, 28, 0, 0, 0, L"四级报名截止", 3, true);
+    std::sort(g_demo.begin(), g_demo.end(), [](const DemoEv& a, const DemoEv& b) {
+        return CompareDT(a.start, b.start) < 0;
+    });
+}
+
+// ---------------- 小工具 ----------------
+static const Theme& TH() { return ThemeAt(g_themeIdx); }
+static Color TagColor(int i) {
+    if (i < 0 || i >= TAG_COUNT) return Color(255, 160, 160, 160);
+    return Hex(g_tags[i].hex);
+}
+static bool IsHover(int cmd) { return g_hoverCmd == cmd; }
+static void AddHit(RectF r, int cmd) { if (cmd) g_hits.push_back(Hit{ r, cmd }); }
+static void AddNoDrag(RectF r) {
+    RECT rc{ (LONG)r.X, (LONG)r.Y, (LONG)(r.X + r.Width), (LONG)(r.Y + r.Height) };
+    g_noDrag.push_back(rc);
+}
+static void Txt(Graphics& g, const std::wstring& s, float px, bool bold, Color c, RectF r,
+                int align = ALIGN_LEFT, bool display = false, bool ellipsis = true) {
+    Text(g, s, px, bold, c, r, align, display, ellipsis);
+}
+static void HudCorners(Graphics& g, RectF r, Color c, float len = 9.0f) {
+    float L = S(len), w = S(1.4f);
+    Line(g, r.X + r.Width - L, r.Y, r.X + r.Width, r.Y, c, w);
+    Line(g, r.X + r.Width, r.Y, r.X + r.Width, r.Y + L, c, w);
+    Line(g, r.X, r.Y + r.Height - L, r.X, r.Y + r.Height, c, w);
+    Line(g, r.X, r.Y + r.Height, r.X + L, r.Y + r.Height, c, w);
+}
+static void Btn(Graphics& g, RectF r, int cmd, const std::wstring& label, int style /*0 ghost 1 primary 2 outline*/,
+                int icon = -1) {
+    const Theme& th = TH();
+    bool hover = IsHover(cmd);
+    if (style == 1) {
+        FillRoundRect(g, r, S(8), hover ? WithAlpha(th.accent, 255) : th.accent);
+        if (hover) Glow(g, r, S(8), WithAlpha(th.accent, 60), 2);
+    } else if (style == 2) {
+        FillRoundRect(g, r, S(8), hover ? th.cardHover : th.card);
+        StrokeRoundRect(g, r, S(8), hover ? WithAlpha(th.accent, 120) : th.border, S(1));
+    } else {
+        if (hover) FillRoundRect(g, r, S(8), WithAlpha(th.cardHover, 200));
+    }
+    Color fg = style == 1 ? th.onAccent : (hover ? th.text : th.dim);
+    float iconW = icon >= 0 ? S(15) : 0;
+    float gap = (icon >= 0 && !label.empty()) ? S(6) : 0;
+    SizeF sz; MeasureText(g, label, S(12.5f), true, sz);
+    float total = iconW + gap + sz.Width;
+    float x = r.X + (r.Width - total) / 2;
+    if (icon >= 0) {
+        Icon(g, icon, RectF(x, r.Y + (r.Height - S(15)) / 2, S(15), S(15)), fg, 1.5f);
+        x += iconW + gap;
+    }
+    if (!label.empty())
+        Txt(g, label, S(12.5f), true, fg, RectF(x, r.Y, sz.Width + S(2), r.Height), ALIGN_VCENTER);
+    AddHit(r, cmd);
+    if (r.Y < S(58)) AddNoDrag(r);
+}
+static void IconBtn(Graphics& g, RectF r, int cmd, int icon, float iconSize = 15.0f) {
+    const Theme& th = TH();
+    bool hover = IsHover(cmd);
+    if (hover) FillRoundRect(g, r, S(8), WithAlpha(th.cardHover, 235));
+    Color fg = hover ? th.text : th.dim;
+    Icon(g, icon, RectF(r.X + (r.Width - S(iconSize)) / 2, r.Y + (r.Height - S(iconSize)) / 2, S(iconSize), S(iconSize)), fg, 1.5f);
+    AddHit(r, cmd);
+    if (r.Y < S(58)) AddNoDrag(r);
+}
+
+// ---------------- 绘制 ----------------
+static void EnsureBuffer(int w, int h) {
+    if (g_memdc && g_bufW == w && g_bufH == h) return;
+    if (g_memdc) { DeleteDC(g_memdc); g_memdc = nullptr; }
+    if (g_hbmp) { DeleteObject(g_hbmp); g_hbmp = nullptr; }
+    HDC screen = GetDC(g_hwnd);
+    g_memdc = CreateCompatibleDC(screen);
+    BITMAPINFO bi{};
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = w;
+    bi.bmiHeader.biHeight = -h;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    g_hbmp = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    ReleaseDC(g_hwnd, screen);
+    g_bits = bits;
+    SelectObject(g_memdc, g_hbmp);
+    g_bufW = w; g_bufH = h;
+}
+
+static void DrawTitleBar(Graphics& g, float W, const Theme& th) {
+    float H = S(58);
+    // 品牌
+    float x = S(20);
+    float iconS = S(21);
+    Icon(g, ICO_STAR, RectF(x, (H - iconS) / 2, iconS, iconS), th.accent, 1.4f);
+    SizeF brandSz; MeasureText(g, L"星历", S(17), true, brandSz);
+    Txt(g, L"星历", S(17), true, th.text, RectF(x + iconS + S(9), 0, brandSz.Width + S(4), H), ALIGN_VCENTER);
+    // 品牌下的微光
+    Txt(g, L"XINGLI", S(7.5f), false, WithAlpha(th.dim2, 150), RectF(x + iconS + S(9), H - S(17), S(60), S(12)), ALIGN_LEFT, true);
+    // 视图切换
+    const wchar_t* views[4] = { L"月", L"周", L"日", L"日程" };
+    float tabW = S(56), tabH = S(32), gap = S(3), tx = S(168);
+    RectF seg(tx - S(4), (H - tabH) / 2 - S(1), tabW * 4 + gap * 3 + S(8), tabH + S(2));
+    FillRoundRect(g, seg, S(10), WithAlpha(th.panel2, 170));
+    StrokeRoundRect(g, seg, S(10), th.borderSoft, S(1));
+    for (int i = 0; i < 4; ++i) {
+        RectF r(tx + i * (tabW + gap), (H - tabH) / 2, tabW, tabH);
+        bool active = g_view == i, hover = IsHover(CMD_VIEW_MONTH + i);
+        if (active) {
+            FillRoundRect(g, r, S(8), WithAlpha(th.accent, 26));
+            StrokeRoundRect(g, r, S(8), WithAlpha(th.accent, 70), S(1));
+        } else if (hover) FillRoundRect(g, r, S(8), WithAlpha(th.cardHover, 180));
+        Color fg = active ? th.accent : (hover ? th.text : th.dim);
+        Txt(g, views[i], S(12.5f), active, fg, r, ALIGN_CENTER | ALIGN_VCENTER);
+        AddHit(r, CMD_VIEW_MONTH + i);
+        AddNoDrag(r);
+    }
+    // 右侧按钮
+    float rx = W - S(18);
+    auto rightBtn = [&](int cmd, int icon) {
+        rx -= S(34);
+        IconBtn(g, RectF(rx, (H - S(34)) / 2, S(34), S(34)), cmd, icon, 14.0f);
+        rx -= S(2);
+    };
+    rightBtn(CMD_CLOSE, ICO_CLOSE);
+    rightBtn(CMD_MAX, ICO_MAX);
+    rightBtn(CMD_MIN, ICO_MIN);
+    rx -= S(6);
+    rightBtn(CMD_SETTINGS, ICO_SETTINGS);
+    rightBtn(CMD_THEME, ICO_THEME);
+    rx -= S(10);
+    // 新建
+    rx -= S(92);
+    Btn(g, RectF(rx, (H - S(34)) / 2, S(92), S(34)), CMD_NEW, L"新建", 1, ICO_PLUS);
+    rx -= S(12);
+    // 搜索框
+    rx -= S(206);
+    RectF searchR(rx, (H - S(34)) / 2, S(206), S(34));
+    FillRoundRect(g, searchR, S(9), WithAlpha(th.panel2, 190));
+    StrokeRoundRect(g, searchR, S(9), IsHover(CMD_SEARCH) ? WithAlpha(th.accent, 100) : th.borderSoft, S(1));
+    Icon(g, ICO_SEARCH, RectF(searchR.X + S(11), searchR.Y + S(10), S(14), S(14)), th.dim2, 1.5f);
+    Txt(g, L"搜索日程、标签…", S(11.5f), false, th.dim2, RectF(searchR.X + S(32), searchR.Y, searchR.Width - S(70), searchR.Height), ALIGN_VCENTER);
+    RectF kbd(searchR.X + searchR.Width - S(30), searchR.Y + S(9), S(20), S(16));
+    FillRoundRect(g, kbd, S(4), WithAlpha(th.card, 220));
+    Txt(g, L"/", S(10), true, th.dim2, kbd, ALIGN_CENTER | ALIGN_VCENTER, true);
+    AddHit(searchR, CMD_SEARCH);
+    AddNoDrag(searchR);
+    // 标题栏底线
+    Line(g, 0, H - S(1), W, H - S(1), th.borderSoft, S(1));
+    // 顶部微光
+    FillVGradient(g, RectF(0, 0, W, S(120)), WithAlpha(th.accent, 8), WithAlpha(th.accent, 0));
+}
+
+static void DrawSidebar(Graphics& g, float W, float H, const Theme& th) {
+    float top = S(58), sideW = S(244);
+    FillRoundRect(g, RectF(0, top, sideW, H - top), 0, th.panel);
+    Line(g, sideW - S(1), top, sideW - S(1), H, th.borderSoft, S(1));
+    float pad = S(16), innerW = sideW - pad * 2;
+    float y = top + pad;
+
+    // 今日卡片
+    RectF today(pad, y, innerW, S(142));
+    FillRoundRect(g, today, S(14), th.card);
+    FillRoundRectV(g, RectF(today.X, today.Y, today.Width, today.Height * 0.55f), S(14), WithAlpha(th.accent, 10), WithAlpha(th.accent, 0));
+    StrokeRoundRect(g, today, S(14), th.border, S(1));
+    HudCorners(g, today, WithAlpha(th.accent, 200), 9.0f);
+    Txt(g, Fmt(L"%d", g_now.d), S(44), true, th.accent, RectF(today.X + S(14), today.Y + S(8), S(80), S(58)), ALIGN_LEFT, true);
+    Txt(g, Fmt(L"%d月 · %s", g_now.mo, WeekdayCN(DayOfWeek(g_now.y, g_now.mo, g_now.d))),
+        S(12.5f), false, th.dim, RectF(today.X + S(92), today.Y + S(16), today.Width - S(104), S(20)));
+    Txt(g, L"第 6 周 · 单周", S(11), false, th.dim2, RectF(today.X + S(92), today.Y + S(38), today.Width - S(104), S(18)));
+    Txt(g, Fmt(L"%02d:%02d", g_now.h, g_now.mi), S(22), true, th.text, RectF(today.X + S(92), today.Y + S(58), S(100), S(30)), ALIGN_LEFT, true);
+    Txt(g, L"今日 · 3 项日程", S(10.5f), false, th.dim2, RectF(today.X + S(14), today.Y + S(96), today.Width - S(28), S(16)));
+    // 今日进度条
+    RectF bar(today.X + S(14), today.Y + S(120), innerW - S(28), S(4));
+    FillRoundRect(g, bar, S(2), WithAlpha(th.border, 255));
+    FillRoundRect(g, RectF(bar.X, bar.Y, bar.Width * 0.62f, bar.Height), S(2), th.accent);
+    Txt(g, L"已过 62%", S(9), false, th.dim2, RectF(today.X + S(14), today.Y + S(108), S(90), S(14)));
+    Txt(g, L"2 个待办", S(9), false, th.dim2, RectF(RX(today) - S(80), today.Y + S(108), S(66), S(14)), ALIGN_RIGHT);
+    y += today.Height + S(16);
+
+    // 喝水卡片
+    RectF water(pad, y, innerW, S(92));
+    FillRoundRect(g, water, S(14), th.card);
+    StrokeRoundRect(g, water, S(14), IsHover(CMD_WATER) ? WithAlpha(th.accent2, 110) : th.border, S(1));
+    Icon(g, ICO_DROP, RectF(water.X + S(13), water.Y + S(13), S(15), S(15)), th.accent2, 1.5f);
+    Txt(g, L"喝水", S(11.5f), true, th.dim, RectF(water.X + S(35), water.Y + S(10), S(60), S(18)));
+    Txt(g, Fmt(L"%d / 8 杯", g_waterCups), S(15), true, th.accent2, RectF(RX(water) - S(90), water.Y + S(8), S(76), S(22)), ALIGN_RIGHT, true);
+    float dz = S(15);
+    for (int i = 0; i < 8; ++i) {
+        float dx = water.X + S(14) + i * (dz + S(5));
+        bool on = i < g_waterCups;
+        Icon(g, ICO_DROP, RectF(dx, water.Y + S(40), dz, dz), on ? th.accent2 : WithAlpha(th.dim2, 90), 1.4f);
+    }
+    Txt(g, L"每 45 分钟提醒 · 下次 21:00 · 点一下 +1 杯", S(9.5f), false, th.dim2,
+        RectF(water.X + S(14), water.Y + S(62), water.Width - S(28), S(16)));
+    AddHit(water, CMD_WATER);
+    y += water.Height + S(16);
+
+    // 标签区
+    Txt(g, L"标签", S(11), true, th.dim, RectF(pad, y, S(60), S(18)));
+    Txt(g, L"按标签筛选", S(9.5f), false, th.dim2, RectF(pad, y, innerW, S(18)), ALIGN_RIGHT);
+    y += S(24);
+    float rowH = S(23);
+    float bottomLimit = H - S(16) - S(88) - S(12);   // 留出倒计时卡片
+    for (int i = 0; i < TAG_COUNT; ++i) {
+        if (y + rowH > bottomLimit) break;
+        RectF row(pad - S(4), y, innerW + S(8), rowH);
+        bool active = g_tagFilter.count(i) > 0;
+        if (IsHover(CMD_TAG_BASE + i) || active) FillRoundRect(g, row, S(7), WithAlpha(th.cardHover, active ? 220 : 160));
+        FillCircle(g, row.X + S(12), row.Y + rowH / 2, S(3.6f), TagColor(i));
+        Txt(g, g_tags[i].name, S(11.5f), active, active ? th.text : th.dim,
+            RectF(row.X + S(24), row.Y, S(120), rowH), ALIGN_VCENTER);
+        Txt(g, Fmt(L"%d", 3 + (i * 7) % 9), S(10), false, th.dim2, RectF(row.X + row.Width - S(42), row.Y, S(30), rowH),
+            ALIGN_RIGHT | ALIGN_VCENTER, true);
+        AddHit(row, CMD_TAG_BASE + i);
+        y += rowH;
+    }
+
+    // 倒计时卡片（贴底）
+    RectF cd(pad, H - S(16) - S(88), innerW, S(88));
+    FillRoundRect(g, cd, S(14), th.card);
+    StrokeRoundRect(g, cd, S(14), th.border, S(1));
+    Txt(g, L"倒计时", S(10.5f), true, th.dim2, RectF(cd.X + S(14), cd.Y + S(10), S(80), S(16)));
+    Txt(g, L"期中考试", S(11.5f), false, th.text, RectF(cd.X + S(14), cd.Y + S(30), S(100), S(18)));
+    Txt(g, L"11 天", S(13), true, th.accent, RectF(RX(cd) - S(84), cd.Y + S(28), S(70), S(20)), ALIGN_RIGHT, true);
+    Txt(g, L"英语四级", S(11.5f), false, th.dim, RectF(cd.X + S(14), cd.Y + S(54), S(100), S(18)));
+    Txt(g, L"63 天", S(12), true, th.dim, RectF(RX(cd) - S(84), cd.Y + S(53), S(70), S(20)), ALIGN_RIGHT, true);
+}
+
+static void DrawChip(Graphics& g, RectF r, int tagIdx, const std::wstring& timeText, const std::wstring& title,
+                     bool allDay, const Theme& th) {
+    Color tc = TagColor(tagIdx);
+    Color bg = allDay ? WithAlpha(tc, 60) : WithAlpha(tc, 34);
+    FillRoundRect(g, r, S(5), bg);
+    FillRoundRect(g, RectF(r.X, r.Y + S(3), S(2.2f), r.Height - S(6)), S(1), WithAlpha(tc, 235));
+    float tx = r.X + S(7);
+    if (!allDay && !timeText.empty()) {
+        Txt(g, timeText, S(9.5f), true, WithAlpha(tc, 255), RectF(tx, r.Y, S(34), r.Height), ALIGN_VCENTER);
+        tx += S(35);
+    }
+    Txt(g, title, S(10.5f), allDay, allDay ? WithAlpha(th.text, 255) : th.text, RectF(tx, r.Y, RX(r) - tx - S(4), r.Height), ALIGN_VCENTER);
+}
+
+static void DrawMonthView(Graphics& g, float x, float y, float W, float H, const Theme& th) {
+    // 头部
+    DateTime first = MakeDT(g_cursor.y, g_cursor.mo, 1);
+    Txt(g, Fmt(L"%d年%d月", g_cursor.y, g_cursor.mo), S(23), true, th.text, RectF(x, y, S(220), S(34)), ALIGN_LEFT, true);
+    Txt(g, Fmt(L"第 %d 周", WeekOfYear(g_cursor)), S(11), false, th.dim, RectF(x + S(170), y + S(9), S(80), S(20)));
+    float rx = x + W;
+    rx -= S(64);
+    Btn(g, RectF(rx, y + S(2), S(64), S(30)), CMD_TODAY, L"今天", 2);
+    rx -= S(38);
+    IconBtn(g, RectF(rx, y + S(2), S(30), S(30)), CMD_NEXT, ICO_CHEV_RIGHT, 14);
+    rx -= S(32);
+    IconBtn(g, RectF(rx, y + S(2), S(30), S(30)), CMD_PREV, ICO_CHEV_LEFT, 14);
+
+    float gridTop = y + S(46);
+    float headH = S(26);
+    // 星期表头
+    DateTime ws = StartOfWeek(first, 1);
+    for (int i = 0; i < 7; ++i) {
+        float cw = W / 7.0f;
+        float cx = x + i * cw;
+        Color c = (i >= 5) ? WithAlpha(th.accent2, 200) : th.dim;
+        Txt(g, WeekdayCN((i + 1) % 7), S(11), false, c, RectF(cx, gridTop, cw, headH), ALIGN_CENTER | ALIGN_VCENTER);
+    }
+    // 网格
+    RectF grid(x, gridTop + headH, W, H - (gridTop + headH - y));
+    FillRoundRect(g, grid, S(14), WithAlpha(th.panel2, 210));
+    StrokeRoundRect(g, grid, S(14), th.border, S(1));
+    float cw = grid.Width / 7.0f, ch = grid.Height / 6.0f;
+    int startSerial = DaySerial(ws.y, ws.mo, ws.d);
+    g.SetClip(grid);
+    for (int row = 0; row < 6; ++row) {
+        for (int col = 0; col < 7; ++col) {
+            int serial = startSerial + row * 7 + col;
+            Date d = FromSerial(serial);
+            DateTime day = MakeDT(d.y, d.m, d.d);
+            RectF cell(grid.X + col * cw, grid.Y + row * ch, cw, ch);
+            bool inMonth = (day.mo == g_cursor.mo && day.y == g_cursor.y);
+            bool isToday = SameDay(day, g_now);
+            bool isCursor = SameDay(day, g_cursor);
+            Color cellBg = inMonth ? Color(0, 0, 0, 0) : WithAlpha(th.bg, 120);
+            if (cellBg.GetA() > 0) FillRoundRect(g, RectF(cell.X + S(1), cell.Y + S(1), cell.Width - S(2), cell.Height - S(2)), S(10), cellBg);
+            if (isToday) {
+                FillRoundRect(g, RectF(cell.X + S(2), cell.Y + S(2), cell.Width - S(4), cell.Height - S(4)), S(10), WithAlpha(th.accent, 16));
+                StrokeRoundRect(g, RectF(cell.X + S(2), cell.Y + S(2), cell.Width - S(4), cell.Height - S(4)), S(10), WithAlpha(th.accent, 150), S(1.2f));
+                HudCorners(g, RectF(cell.X + S(2), cell.Y + S(2), cell.Width - S(4), cell.Height - S(4)), WithAlpha(th.accent, 210), 8);
+            } else if (isCursor) {
+                FillRoundRect(g, RectF(cell.X + S(2), cell.Y + S(2), cell.Width - S(4), cell.Height - S(4)), S(10), WithAlpha(th.cardHover, 90));
+            }
+            AddHit(RectF(cell.X, cell.Y, cell.Width, cell.Height), CMD_DAY_BASE + serial);
+            // 日期数字
+            Color numColor = isToday ? th.accent : (inMonth ? (col >= 5 ? WithAlpha(th.accent2, 230) : th.text) : th.dim2);
+            Txt(g, Fmt(L"%d", day.d), S(14), isToday, numColor, RectF(cell.X + S(10), cell.Y + S(7), S(46), S(22)), ALIGN_LEFT, true);
+            if (isToday) {
+                Txt(g, L"今天", S(9), true, th.accent, RectF(cell.X + S(38), cell.Y + S(10), S(40), S(16)));
+            } else if (day.d == 1) {
+                Txt(g, Fmt(L"%d月", day.mo), S(9.5f), false, th.dim2, RectF(cell.X + S(30), cell.Y + S(10), S(40), S(16)));
+            }
+            // 事件
+            std::vector<const DemoEv*> evs;
+            for (auto& e : g_demo) if (e.serial() == serial) evs.push_back(&e);
+            float cy = cell.Y + S(31);
+            float maxY = BY(cell) - S(8);
+            int maxChips = (int)std::floor((maxY - cy) / S(24));
+            maxChips = std::max(0, std::min(maxChips, 4));
+            int shown = 0;
+            for (size_t k = 0; k < evs.size() && shown < maxChips; ++k, ++shown) {
+                if ((int)evs.size() - shown > maxChips - shown && shown == maxChips - 1) break;
+                const DemoEv* e = evs[k];
+                RectF chip(cell.X + S(6), cy, cell.Width - S(12), S(21));
+                DateTime en = AddMinutesDT(e->start, e->durMin);
+                std::wstring ts = e->allDay ? L"" : (e->start.h == 0 && e->start.mi == 0 ? L"" : TimeStr(e->start));
+                DrawChip(g, chip, e->tag, ts, e->title, e->allDay, th);
+                AddHit(chip, CMD_EVENT_BASE + (int)(e - &g_demo[0]));
+                cy += S(24);
+            }
+            int remaining = (int)evs.size() - shown;
+            if (remaining > 0 && cy + S(16) < BY(cell) - S(2)) {
+                Txt(g, Fmt(L"+%d 更多", remaining), S(9.5f), false, th.dim2,
+                    RectF(cell.X + S(10), cy - S(2), cell.Width - S(20), S(16)));
+            }
+        }
+    }
+    g.ResetClip();
+    // 网格线
+    for (int i = 1; i < 7; ++i) Line(g, grid.X + i * cw, grid.Y, grid.X + i * cw, BY(grid), WithAlpha(th.borderSoft, 150), S(1));
+    for (int i = 1; i < 6; ++i) Line(g, grid.X, grid.Y + i * ch, RX(grid), grid.Y + i * ch, WithAlpha(th.borderSoft, 150), S(1));
+    // 底部提示
+    Txt(g, L"双击空白新建 · 点击日程查看 · 拖拽改期 · Ctrl+滚轮切换月份 · 按 / 搜索", S(9.5f), false, th.dim2,
+        RectF(grid.X + S(4), BY(grid) + S(8), grid.Width, S(16)));
+}
+
+static void PaintAll(Graphics& g, int W, int H) {
+    const Theme& th = TH();
+    g_hits.clear();
+    g_noDrag.clear();
+    // 背景
+    FillVGradient(g, RectF(0, 0, (float)W, (float)H), th.bgTop, th.bgBottom);
+    // 环境光
+    {
+        GraphicsPath p;
+        RectF glowR((float)W * 0.55f, -S(220), (float)W * 0.6f, S(640));
+        for (int i = 6; i >= 1; --i) {
+            float ex = (float)i * S(30);
+            FillRoundRect(g, RectF(glowR.X - ex, glowR.Y - ex, glowR.Width + ex * 2, glowR.Height + ex * 2), S(300),
+                          Color(3, th.accent2.GetR(), th.accent2.GetG(), th.accent2.GetB()));
+        }
+        FillRoundRect(g, RectF(-S(200), (float)H * 0.45f, (float)W * 0.5f, (float)H * 0.7f), S(300),
+                      Color(3, th.accent.GetR(), th.accent.GetG(), th.accent.GetB()));
+    }
+    DrawTitleBar(g, (float)W, th);
+    DrawSidebar(g, (float)W, (float)H, th);
+    float cx = S(244) + S(22), cy = S(58) + S(16);
+    DrawMonthView(g, cx, cy, (float)W - cx - S(22), (float)H - cy - S(24), th);
+}
+
+static void Present() {
+    HDC dc = GetDC(g_hwnd);
+    BitBlt(dc, 0, 0, g_bufW, g_bufH, g_memdc, 0, 0, SRCCOPY);
+    ReleaseDC(g_hwnd, dc);
+}
+
+static void Render() {
+    RECT rc; GetClientRect(g_hwnd, &rc);
+    int W = rc.right - rc.left, H = rc.bottom - rc.top;
+    if (W <= 0 || H <= 0) return;
+    EnsureBuffer(W, H);
+    Graphics g(g_memdc);
+    g.SetSmoothingMode(SmoothingModeAntiAlias);
+    g.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
+    g.SetPixelOffsetMode(PixelOffsetModeHalf);
+    PaintAll(g, W, H);
+    Present();
+}
+
+static bool SaveShot(const std::wstring& path) {
+    if (!g_bits) return false;
+    for (int i = 0; i < g_bufW * g_bufH; ++i) ((DWORD*)g_bits)[i] |= 0xFF000000;
+    Bitmap bmp(g_bufW, g_bufH, g_bufW * 4, PixelFormat32bppPARGB, (BYTE*)g_bits);
+    EnsureDir(PathJoin(GetExeDir(), L"shots"));
+    bool ok = SavePng(&bmp, path);
+    DebugLog(L"shot saved=%d path=%s size=%dx%d", ok ? 1 : 0, path.c_str(), g_bufW, g_bufH);
+    return ok;
+}
+
+// ---------------- 命中与命令 ----------------
+static int HitTest(int x, int y) {
+    for (auto it = g_hits.rbegin(); it != g_hits.rend(); ++it) {
+        if (x >= it->r.X && x <= it->r.X + it->r.Width && y >= it->r.Y && y <= it->r.Y + it->r.Height)
+            return it->cmd;
+    }
+    return 0;
+}
+
+static void ExecuteCmd(int cmd) {
+    if (cmd >= CMD_VIEW_MONTH && cmd <= CMD_VIEW_AGENDA) {
+        g_view = cmd - CMD_VIEW_MONTH;
+    } else if (cmd == CMD_MIN) {
+        ShowWindow(g_hwnd, SW_MINIMIZE);
+    } else if (cmd == CMD_MAX) {
+        ShowWindow(g_hwnd, g_maximized ? SW_RESTORE : SW_MAXIMIZE);
+    } else if (cmd == CMD_CLOSE) {
+        DestroyWindow(g_hwnd);
+    } else if (cmd == CMD_THEME) {
+        g_themeIdx = (g_themeIdx + 1) % ThemeCount();
+    } else if (cmd == CMD_PREV) {
+        g_cursor = AddMonthsDT(g_cursor, -1);
+    } else if (cmd == CMD_NEXT) {
+        g_cursor = AddMonthsDT(g_cursor, 1);
+    } else if (cmd == CMD_TODAY) {
+        g_cursor = Today();
+    } else if (cmd == CMD_WATER) {
+        g_waterCups = std::min(8, g_waterCups + 1);
+    } else if (cmd >= CMD_TAG_BASE && cmd < CMD_TAG_BASE + 200) {
+        int idx = cmd - CMD_TAG_BASE;
+        if (g_tagFilter.count(idx)) g_tagFilter.erase(idx); else g_tagFilter.insert(idx);
+    }
+    InvalidateRect(g_hwnd, nullptr, FALSE);
+}
+
+// ---------------- 窗口过程 ----------------
+static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+    case WM_CREATE: {
+        BOOL dark = TRUE;
+        DwmSetWindowAttribute(hwnd, 20, &dark, sizeof(dark));   // 深色边框
+        int corner = 2;                                          // 圆角（Win11）
+        DwmSetWindowAttribute(hwnd, 33, &corner, sizeof(corner));
+        SetTimer(hwnd, 1, 1000, nullptr);
+        return 0;
+    }
+    case WM_NCCALCSIZE:
+        if (wParam == TRUE) {
+            NCCALCSIZE_PARAMS* p = (NCCALCSIZE_PARAMS*)lParam;
+            if (IsZoomed(hwnd)) {
+                MONITORINFO mi{ sizeof(mi) };
+                GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi);
+                p->rgrc[0] = mi.rcWork;
+            }
+            return 0;
+        }
+        break;
+    case WM_NCACTIVATE:
+        return TRUE;
+    case WM_GETMINMAXINFO: {
+        MINMAXINFO* mm = (MINMAXINFO*)lParam;
+        mm->ptMinTrackSize.x = (LONG)S(1080);
+        mm->ptMinTrackSize.y = (LONG)S(700);
+        return 0;
+    }
+    case WM_NCHITTEST: {
+        POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        RECT wr; GetWindowRect(hwnd, &wr);
+        int border = (int)S(6);
+        bool zoomed = IsZoomed(hwnd) != 0;
+        if (!zoomed) {
+            bool left = pt.x < wr.left + border, right = pt.x >= wr.right - border;
+            bool top = pt.y < wr.top + border, bottom = pt.y >= wr.bottom - border;
+            if (top && left) return HTTOPLEFT;
+            if (top && right) return HTTOPRIGHT;
+            if (bottom && left) return HTBOTTOMLEFT;
+            if (bottom && right) return HTBOTTOMRIGHT;
+            if (top) return HTTOP;
+            if (bottom) return HTBOTTOM;
+            if (left) return HTLEFT;
+            if (right) return HTRIGHT;
+        }
+        POINT cp = pt;
+        ScreenToClient(hwnd, &cp);
+        RECT rc; GetClientRect(hwnd, &rc);
+        if (cp.y < (int)S(58)) {
+            for (auto& r : g_noDrag)
+                if (cp.x >= r.left && cp.x <= r.right && cp.y >= r.top && cp.y <= r.bottom) return HTCLIENT;
+            return HTCAPTION;
+        }
+        return HTCLIENT;
+    }
+    case WM_SIZE:
+        g_maximized = IsZoomed(hwnd) != 0;
+        if (g_bufW != LOWORD(lParam) || g_bufH != HIWORD(lParam)) InvalidateRect(hwnd, nullptr, FALSE);
+        break;
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(hwnd, &ps);
+        Render();
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_TIMER:
+        if (wParam == 1) {
+            g_now = NowDT();
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return 0;
+    case WM_MOUSEMOVE: {
+        if (!g_hwnd) break;
+        TRACKMOUSEEVENT tme{ sizeof(tme), TME_LEAVE, hwnd, 0 };
+        TrackMouseEvent(&tme);
+        int cmd = HitTest(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+        if (cmd != g_hoverCmd) { g_hoverCmd = cmd; InvalidateRect(hwnd, nullptr, FALSE); }
+        return 0;
+    }
+    case WM_MOUSELEAVE:
+        if (g_hoverCmd) { g_hoverCmd = 0; InvalidateRect(hwnd, nullptr, FALSE); }
+        return 0;
+    case WM_SETCURSOR: {
+        if (LOWORD(lParam) == HTCLIENT) {
+            SetCursor(g_hoverCmd ? LoadCursorW(nullptr, IDC_HAND) : LoadCursorW(nullptr, IDC_ARROW));
+            return TRUE;
+        }
+        break;
+    }
+    case WM_LBUTTONUP: {
+        int cmd = HitTest(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+        if (cmd) ExecuteCmd(cmd);
+        return 0;
+    }
+    case WM_LBUTTONDBLCLK: {
+        int cmd = HitTest(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+        if (cmd >= CMD_DAY_BASE && cmd < CMD_DAY_BASE + 100000) {
+            Date d = FromSerial(cmd - CMD_DAY_BASE);
+            g_cursor = MakeDT(d.y, d.m, d.d);
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return 0;
+    }
+    case WM_KEYDOWN:
+        if (wParam == VK_ESCAPE) { /* overlay 关闭，M1 无 */ }
+        break;
+    case WM_DESTROY:
+        KillTimer(hwnd, 1);
+        PostQuitMessage(0);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+static void SetDpiAwareness() {
+    HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    if (user32) {
+        typedef BOOL(WINAPI* PFN_SetProcessDpiAwarenessContext)(HANDLE);
+        auto fn = (PFN_SetProcessDpiAwarenessContext)GetProcAddress(user32, "SetProcessDpiAwarenessContext");
+        if (fn && fn((HANDLE)-4)) return;
+        typedef BOOL(WINAPI* PFN_SetProcessDPIAware)();
+        auto fn2 = (PFN_SetProcessDPIAware)GetProcAddress(user32, "SetProcessDPIAware");
+        if (fn2) fn2();
+    }
+}
+
+int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
+    // 参数
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    for (int i = 1; i < argc; ++i) {
+        std::wstring a = argv[i];
+        if (a == L"--shot" && i + 1 < argc) { g_shotPath = argv[++i]; g_shotMode = true; }
+        else if (a == L"--theme" && i + 1 < argc) { g_themeIdx = ThemeIndexById(argv[++i]); }
+        else if (a == L"--demo") { g_demoMode = true; }
+        else if (a == L"--selftest") { g_selftest = true; }
+        else if (a == L"--view" && i + 1 < argc) {
+            std::wstring v = argv[++i];
+            if (v == L"month") g_view = 0; else if (v == L"week") g_view = 1; else if (v == L"day") g_view = 2; else g_view = 3;
+        } else if (a == L"--w" && i + 1 < argc) { g_forceW = _wtoi(argv[++i]); }
+        else if (a == L"--h" && i + 1 < argc) { g_forceH = _wtoi(argv[++i]); }
+    }
+    LocalFree(argv);
+
+    if (g_selftest) { EnsureDir(GetDataDir()); return RunSelfTests(); }
+
+    SetDpiAwareness();
+    {
+        HDC screen = GetDC(nullptr);
+        gfx::dpi = GetDeviceCaps(screen, LOGPIXELSX) / 96.0f;
+        ReleaseDC(nullptr, screen);
+    }
+
+    GdiplusStartupInput gsi;
+    GdiplusStartup(&g_gdiToken, &gsi, nullptr);
+    gfx::Init();
+    BuildDemoData();
+    g_cursor = Today();
+    g_now = NowDT();
+
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
+    wc.lpfnWndProc = WndProc;
+    wc.hInstance = hInst;
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hbrBackground = nullptr;
+    wc.lpszClassName = L"XingLiMain";
+    RegisterClassExW(&wc);
+
+    int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
+    RECT work{}; SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+    int logicW = g_forceW > 0 ? g_forceW : 1360;
+    int logicH = g_forceH > 0 ? g_forceH : 860;
+    int winW = (int)(logicW * gfx::dpi), winH = (int)(logicH * gfx::dpi);
+    if (winW > (work.right - work.left) * 94 / 100) winW = (work.right - work.left) * 94 / 100;
+    if (winH > (work.bottom - work.top) * 94 / 100) winH = (work.bottom - work.top) * 94 / 100;
+    int x = work.left + (work.right - work.left - winW) / 2;
+    int y = work.top + (work.bottom - work.top - winH) / 2;
+    (void)sw; (void)sh;
+
+    g_hwnd = CreateWindowExW(0, L"XingLiMain", L"星历 · XingLi",
+                             WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+                             x, y, winW, winH, nullptr, nullptr, hInst, nullptr);
+    if (!g_hwnd) return 1;
+
+    ShowWindow(g_hwnd, g_shotMode ? SW_SHOWNOACTIVATE : SW_SHOW);
+    UpdateWindow(g_hwnd);
+
+    if (g_shotMode) {
+        // 等绘制稳定后保存并退出
+        SetTimer(g_hwnd, 9, 450, nullptr);
+    }
+
+    MSG msg;
+    while (GetMessageW(&msg, nullptr, 0, 0)) {
+        if (msg.message == WM_TIMER && msg.hwnd == g_hwnd && msg.wParam == 9) {
+            KillTimer(g_hwnd, 9);
+            Render();
+            SaveShot(g_shotPath);
+            DestroyWindow(g_hwnd);
+            continue;
+        }
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+
+    if (g_memdc) DeleteDC(g_memdc);
+    if (g_hbmp) DeleteObject(g_hbmp);
+    gfx::Shutdown();
+    GdiplusShutdown(g_gdiToken);
+    return 0;
+}

@@ -1,0 +1,47 @@
+# ===== 编译产物 =====
+bin/
+obj/
+android/app/build/
+android/build/
+android/.gradle/
+.gradle/
+*.o
+*.obj
+*.exe
+*.apk
+*.lnk
+
+# ===== 本机配置与签名密钥（绝不入库） =====
+android/local.properties
+local.properties
+android/keystore/
+android/keystore.properties
+
+# ===== 用户数据（日历、备份、账号、同步缓存，隐私） =====
+data/
+
+# ===== 截图产物（体积大） =====
+shots/
+
+# ===== 日志与临时文件 =====
+*.log
+tmp_*
+patch_*.py
+ocr-*.ps1
+ocr-out.txt
+
+# ===== 发布产物目录（exe/apk 已在上面 *.exe/*.apk 忽略） =====
+release/
+
+# ===== 本地工具（gh 安装包等） =====
+tools/
+
+# ===== 文档截图（含真实日历数据，不公开） =====
+docs/screenshots/
+
+# ===== 私有文档与本地测试脚本（不公开） =====
+PLAN.md
+regress.ps1
+quick.ps1
+docs/
+

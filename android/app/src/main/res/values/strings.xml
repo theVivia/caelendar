@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="shortcut_new_short">新建日程</string>
+    <string name="shortcut_new_long">新建日程</string>
+    <string name="shortcut_today_short">今天</string>
+    <string name="shortcut_today_long">回到今天</string>
+</resources>

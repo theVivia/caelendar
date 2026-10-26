@@ -1903,7 +1903,9 @@ void DrawTitleBar(Graphics& g, float W) {
 
 
 
-    rbtn(CMD_MIN, ICO_MIN, []() { HideMainWindowToTray(); });
+    rbtn(CMD_MIN, ICO_MIN, []() {
+        if (g_hwnd) ShowWindow(g_hwnd, SW_MINIMIZE);   // 最小化 = 任务栏图标，可点恢复
+    });
 
 
 
@@ -6934,7 +6936,7 @@ static void ShowMainWindowNow() {
 
 
 
-void HideMainWindowToTray() {
+void HideMainWindowToTray(bool fromClose) {
 
 
 
@@ -6943,13 +6945,20 @@ void HideMainWindowToTray() {
 
 
     if (!g_hwnd) return;
-    // 托盘图标挂不上时降级：最小化到任务栏（窗口仍可恢复），不隐藏
+    // 托盘图标挂不上时：
+    // - 点最小化 → 最小化到任务栏（任务栏有按钮，可恢复）
+    // - 点关闭   → 保持窗口显示（不隐藏、不最小化），提示用户
     if (!g_trayAdded) {
         AddTrayIcon();
         if (!g_trayAdded) {
-            ShowToast(L"系统托盘不可用，已最小化到任务栏（可点任务栏恢复）");
-            DebugLog(L"hide-to-tray: tray unavailable, fallback to taskbar minimize");
-            ShowWindow(g_hwnd, SW_MINIMIZE);
+            if (fromClose) {
+                ShowToast(L"系统托盘不可用，窗口保持打开（关不掉请先修好系统托盘）");
+                DebugLog(L"close: tray unavailable, keep window visible");
+            } else {
+                ShowToast(L"系统托盘不可用，已最小化到任务栏（可点任务栏恢复）");
+                DebugLog(L"minimize: tray unavailable, fallback to taskbar minimize");
+                ShowWindow(g_hwnd, SW_MINIMIZE);
+            }
             return;
         }
     }
@@ -10029,7 +10038,7 @@ if (ctrl && wParam == 'A' && app.view == VIEW_AGENDA) {
 
 
 
-            HideMainWindowToTray();
+            HideMainWindowToTray(true);
 
 
 

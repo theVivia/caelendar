@@ -14,7 +14,7 @@
 #include <map>
 
 // ---------- 版本 / 基础信息 ----------
-constexpr const wchar_t* kAppVersion = L"3.40";
+constexpr const wchar_t* kAppVersion = L"3.41";
 constexpr const wchar_t* kAppBuildDate = L"2026-10-18";
 
 // ---------- 命令 ID ----------
@@ -857,7 +857,7 @@ void DrawSeriesColorsOverlay(Gdiplus::Graphics& g, float W, float H);
 void DrawCleanupOverlay(Gdiplus::Graphics& g, float W, float H);
 void DrawWidgetSettingsOverlay(Gdiplus::Graphics& g, float W, float H);
 void SyncAutoStart();
-void HideMainWindowToTray();
+void HideMainWindowToTray(bool fromClose = false);
 void UndoAction();
 void EditorSave();
 void RedoAction();

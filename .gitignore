@@ -45,3 +45,6 @@ regress.ps1
 quick.ps1
 docs/
 
+# ===== 诊断日志与临时验证 =====
+logs/
+

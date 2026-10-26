@@ -820,6 +820,11 @@ HANDLE g_singleMutex = nullptr;
 
 
 static bool g_startHidden = false;
+// 托盘图标重试 + explorer(TaskbarCreated) 重建
+static UINT g_taskbarCreatedMsg = 0;
+static const UINT kTrayRetryTimerId = 7801;
+static int  g_trayRetryCount = 0;
+
 bool g_offscreen = false;
 static bool g_testMode = false;
 static bool g_probeWidgetTest = false;
@@ -6755,6 +6760,7 @@ static void AddTrayIcon() {
 
 
     g_nid.hIcon = LoadAppIcon(GetSystemMetrics(SM_CXSMICON));
+    if (!g_nid.hIcon) DebugLog(L"tray: LoadAppIcon NULL (size=%d)", GetSystemMetrics(SM_CXSMICON));
 
 
 
@@ -6802,7 +6808,13 @@ static void AddTrayIcon() {
 
 
 
-        DebugLog(L"tray icon add FAILED");
+        DWORD err = GetLastError();
+        DebugLog(L"tray icon add FAILED err=%lu cbSize=%u hIcon=%p uFlags=0x%x hwnd=%p",
+                 err, (unsigned)g_nid.cbSize, (void*)g_nid.hIcon, (unsigned)g_nid.uFlags, (void*)g_hwnd);
+        if (g_hwnd && g_trayRetryCount < 30) {
+            ++g_trayRetryCount;
+            SetTimer(g_hwnd, kTrayRetryTimerId, 2000, nullptr);
+        }
 
 
 
@@ -6931,6 +6943,15 @@ void HideMainWindowToTray() {
 
 
     if (!g_hwnd) return;
+    // 托盘图标挂不上时不要隐藏窗口，否则窗口找不回来；改为提示后保持显示
+    if (!g_trayAdded) {
+        AddTrayIcon();
+        if (!g_trayAdded) {
+            ShowToast(L"托盘图标暂不可用（系统拒绝），窗口保持显示；可稍后再试或重启资源管理器");
+            DebugLog(L"hide-to-tray skipped: tray not available");
+            return;
+        }
+    }
 
 
 
@@ -7543,6 +7564,13 @@ static void ShowTrayMenu() {
 
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    // explorer 重启（任务栏重建）：重新挂托盘图标
+    if (g_taskbarCreatedMsg != 0 && msg == g_taskbarCreatedMsg) {
+        g_trayAdded = false;
+        g_trayRetryCount = 0;
+        AddTrayIcon();
+        return 0;
+    }
 
 
 
@@ -8125,6 +8153,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
 
     case WM_TIMER:
+        if (wParam == kTrayRetryTimerId) {
+            KillTimer(hwnd, kTrayRetryTimerId);
+            AddTrayIcon();
+            if (!g_trayAdded && g_trayRetryCount < 30) {
+                ++g_trayRetryCount;
+                SetTimer(hwnd, kTrayRetryTimerId, 2000, nullptr);
+                DebugLog(L"tray retry %d", g_trayRetryCount);
+            }
+            return 0;
+        }
 
 
 
@@ -9979,7 +10017,10 @@ if (ctrl && wParam == 'A' && app.view == VIEW_AGENDA) {
 
 
 
-        if (!g_quitting && app.store.settings.closeToTray) {
+        if (!g_quitting && app.store.settings.closeToTray && !g_trayAdded) {
+        AddTrayIcon();
+    }
+    if (!g_quitting && app.store.settings.closeToTray) {
 
 
 
@@ -12937,6 +12978,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
 
 
 
+    g_taskbarCreatedMsg = RegisterWindowMessageW(L"TaskbarCreated");
     g_hwnd = CreateWindowExW(0, L"XingLiMain", L"CAELENDAR",
 
 
@@ -13063,7 +13105,14 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
 
 
 
-    if (!g_shotMode && !g_testMode) AddTrayIcon();
+    if (!g_shotMode && !g_testMode) {
+        if (g_startHidden) {
+            // 开机自启：桌面/任务栏可能还没就绪，延迟 1.5 秒挂托盘（失败还有 30 次重试）
+            SetTimer(g_hwnd, kTrayRetryTimerId, 1500, nullptr);
+        } else {
+            AddTrayIcon();
+        }
+    }
 
 
 

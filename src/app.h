@@ -14,7 +14,7 @@
 #include <map>
 
 // ---------- 版本 / 基础信息 ----------
-constexpr const wchar_t* kAppVersion = L"3.36";
+constexpr const wchar_t* kAppVersion = L"3.39";
 constexpr const wchar_t* kAppBuildDate = L"2026-10-18";
 
 // ---------- 命令 ID ----------

@@ -1,0 +1,8 @@
+
+Deployment Image Servicing and Management tool
+Version: 10.0.26100.8972
+
+Image Version: 10.0.26200.9168
+
+可以修复组件存储。
+The operation completed successfully.

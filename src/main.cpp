@@ -6943,12 +6943,13 @@ void HideMainWindowToTray() {
 
 
     if (!g_hwnd) return;
-    // 托盘图标挂不上时不要隐藏窗口，否则窗口找不回来；改为提示后保持显示
+    // 托盘图标挂不上时降级：最小化到任务栏（窗口仍可恢复），不隐藏
     if (!g_trayAdded) {
         AddTrayIcon();
         if (!g_trayAdded) {
-            ShowToast(L"托盘图标暂不可用（系统拒绝），窗口保持显示；可稍后再试或重启资源管理器");
-            DebugLog(L"hide-to-tray skipped: tray not available");
+            ShowToast(L"系统托盘不可用，已最小化到任务栏（可点任务栏恢复）");
+            DebugLog(L"hide-to-tray: tray unavailable, fallback to taskbar minimize");
+            ShowWindow(g_hwnd, SW_MINIMIZE);
             return;
         }
     }
